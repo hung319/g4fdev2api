@@ -1,7 +1,7 @@
 /**
- * Bun AI Gateway v3.5
- * - Fix HuggingFace: Khôi phục URL gốc có tham số '?inference=warm' để fetch đúng.
- * - Cleanup: Xóa provider Blackbox.
+ * Bun AI Gateway v3.6 (Full Restore Edition)
+ * - Restored: Khôi phục đầy đủ 8 Providers từ file gốc.
+ * - Upgraded: Airforce (Dynamic), HuggingFace (Fix), Headers (Anti-block).
  * - Mode: Strict Namespace (Bắt buộc dùng format 'provider/model').
  */
 
@@ -27,45 +27,66 @@ const COMMON_HEADERS = {
 };
 
 // =================================================================================
-// ⚙️ 1. Cấu hình Providers
+// ⚙️ 1. Cấu hình Providers (Full 8 Sources)
 // =================================================================================
 
 const PROVIDER_CONFIG = {
-  // 1. Airforce
+  // 1. Airforce (Đã nâng cấp lên Dynamic theo yêu cầu cũ của bạn)
   'airforce': { 
     name: 'Airforce API',
     upstreamHost: 'api.airforce',
+    modelsPath: '/v1/models', 
+    chatPath: '/v1/chat/completions'
+  },
+  // 2. AnonDrop (Khôi phục)
+  'anondrop': {
+    name: 'AnonDrop',
+    upstreamHost: 'anondrop.net',
     modelsPath: '/v1/models',
     chatPath: '/v1/chat/completions'
   },
-  // 2. HuggingFace (Đã khôi phục URL gốc)
-  'huggingface': {
-    name: 'HuggingFace',
-    upstreamHost: 'g4f.dev',
-    // URL này lọc các model đã "warm" (sẵn sàng) để tránh trả về rỗng
-    modelsPath: '/api/huggingface/models?inference=warm&&expand[]=inferenceProviderMapping', 
-    chatPath: '/api/huggingface/chat/completions'
-  },
-  // 3. Các provider khác
+  // 3. GPT4Free (Khôi phục)
   'gpt4free': {
-    name: 'GPT4Free',
+    name: 'GPT4Free.pro',
     upstreamHost: 'gpt4free.pro',
     modelsPath: '/v1/models',
     chatPath: '/v1/chat/completions'
   },
+  // 4. Gemini (Khôi phục)
   'gemini': {
-    name: 'Gemini',
+    name: 'Google Gemini',
     upstreamHost: 'g4f.dev',
     modelsPath: '/api/gemini/models',
     chatPath: '/api/gemini/chat/completions'
   },
+  // 5. Grok (Khôi phục)
+  'grok': {
+    name: 'Grok',
+    upstreamHost: 'g4f.dev',
+    modelsPath: '/api/grok/models',
+    chatPath: '/api/grok/chat/completions'
+  },
+  // 6. Pollinations (Khôi phục)
+  'pollinations': {
+    name: 'Pollinations.ai',
+    upstreamHost: 'g4f.dev',
+    modelsPath: '/api/pollinations.ai/models',
+    chatPath: '/api/pollinations.ai/chat/completions'
+  },
+  // 7. Ollama (Khôi phục)
   'ollama': {
     name: 'Ollama',
     upstreamHost: 'g4f.dev',
     modelsPath: '/api/ollama/models',
     chatPath: '/api/ollama/chat/completions'
+  },
+  // 8. HuggingFace (Giữ bản Fix v3.5)
+  'huggingface': {
+    name: 'HuggingFace',
+    upstreamHost: 'g4f.dev',
+    modelsPath: '/api/huggingface/models?inference=warm&&expand[]=inferenceProviderMapping', 
+    chatPath: '/api/huggingface/chat/completions'
   }
-  // Đã xóa Blackbox
 };
 
 // =================================================================================
@@ -75,7 +96,7 @@ const PROVIDER_CONFIG = {
 let MODEL_PROVIDER_MAP = null;
 
 async function buildModelProviderMap() {
-  console.log("🚀 Đang cập nhật danh sách models (Strict Namespace Mode)...");
+  console.log("🚀 Đang cập nhật danh sách models từ 8 nguồn...");
   const map = new Map();
 
   const fetchPromises = Object.entries(PROVIDER_CONFIG).map(async ([providerKey, config]) => {
@@ -94,9 +115,8 @@ async function buildModelProviderMap() {
         if (response.ok) {
             const data = await response.json();
             
-            // Logic Parse (Tương thích cả HF và Airforce)
+            // Parsing Logic đa năng
             if (Array.isArray(data)) {
-                // HF trả về mảng object [{id: "...", ...}] hoặc [{name: "...", ...}]
                 models = data.map(m => m.id || m.name).filter(Boolean);
             } else if (data.data && Array.isArray(data.data)) {
                 models = data.data.map(m => m.id).filter(Boolean);
@@ -104,7 +124,8 @@ async function buildModelProviderMap() {
                 models = data.models.map(m => m.name).filter(Boolean);
             }
         } else {
-            console.warn(`  ⚠️ [${providerKey}] Status: ${response.status}`);
+            // Chỉ warn nhẹ để không spam log, vì một số nguồn g4f thi thoảng chết
+            // console.warn(`  ⚠️ [${providerKey}] Status: ${response.status}`);
         }
       }
 
@@ -120,7 +141,11 @@ async function buildModelProviderMap() {
         });
       });
       
-      console.log(`  -> [${providerKey}] OK: ${models.length} models`);
+      if (models.length > 0) {
+          console.log(`  -> [${providerKey}] OK: ${models.length} models`);
+      } else {
+          console.log(`  -> [${providerKey}] Không tìm thấy models (hoặc API lỗi).`);
+      }
 
     } catch (error) {
       console.error(`  -> [${providerKey}] Error: ${error.message}`);
@@ -152,31 +177,31 @@ async function handleChatCompletionRequest(req) {
         return new Response(JSON.stringify({ error: 'Missing model' }), { status: 400 });
       }
 
-      // Lookup Map (Key phải khớp chính xác "provider/model")
+      // Lookup Map
       const providerInfo = MODEL_PROVIDER_MAP.get(incomingModelId);
 
       if (!providerInfo) {
         return new Response(JSON.stringify({ 
             error: 'Model Not Found', 
-            message: `Model '${incomingModelId}' không tồn tại. Định dạng đúng: 'provider/model'.` 
+            message: `Model '${incomingModelId}' không tồn tại. Định dạng đúng: 'provider/model'. Kiểm tra /v1/models` 
         }), { status: 404, headers: { 'Content-Type': 'application/json' } });
       }
 
-      // Chuẩn bị Request Upstream
+      // Routing Info
       const { upstreamHost, chatPath, targetModelId } = providerInfo;
       const upstreamUrl = `https://${upstreamHost}${chatPath}`;
 
-      // ✅ Strip Prefix: "huggingface/gpt2" -> "gpt2"
+      // Strip Prefix
       const upstreamBody = {
           ...requestBody,
           model: targetModelId 
       };
 
-      console.log(`🔄 Routing: ${incomingModelId} -> ${upstreamHost} (Original: ${targetModelId})`);
+      // console.log(`🔄 Routing: ${incomingModelId} -> ${upstreamHost}`);
 
       const upstreamResponse = await fetch(upstreamUrl, {
         method: 'POST',
-        headers: COMMON_HEADERS, // Dùng chung header "xịn"
+        headers: COMMON_HEADERS,
         body: JSON.stringify(upstreamBody),
         redirect: 'follow'
       });
@@ -199,7 +224,7 @@ async function handleChatCompletionRequest(req) {
 // 🚀 4. Server Entry
 // =================================================================================
 
-console.log(`🚀 Starting Bun AI Gateway v3.5 on port ${PORT}...`);
+console.log(`🚀 Starting Bun AI Gateway v3.6 on port ${PORT}...`);
 buildModelProviderMap();
 
 Bun.serve({
@@ -225,7 +250,8 @@ Bun.serve({
     if (url.pathname === '/') {
         return new Response(JSON.stringify({ 
             status: 'ok', 
-            service: 'Bun AI Gateway v3.5',
+            service: 'Bun AI Gateway v3.6',
+            providers_configured: Object.keys(PROVIDER_CONFIG).length,
             models_count: MODEL_PROVIDER_MAP ? MODEL_PROVIDER_MAP.size : 0 
         }), { headers: { 'Content-Type': 'application/json' }});
     }
@@ -238,7 +264,7 @@ function handleModelsRequest() {
   if (!MODEL_PROVIDER_MAP) return new Response('{}', { status: 503 });
 
   const modelsData = Array.from(MODEL_PROVIDER_MAP.entries()).map(([id, info]) => ({
-    id: id, // Luôn là "provider/model"
+    id: id,
     object: 'model',
     owned_by: info.providerId,
   }));
