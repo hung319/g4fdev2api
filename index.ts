@@ -1,35 +1,50 @@
 /**
- * Bun AI Gateway v3.0 (Ported from Cloudflare Worker)
- *
- * Chức năng:
- * 1. API Gateway thông minh tự động cấu hình.
- * 2. Routing động dựa trên model name.
- * 3. Đã loại bỏ UI, tối ưu cho backend service.
+ * Bun AI Gateway v3.3 (Stable Fix)
+ * - Fix: Đồng bộ Headers giữa việc lấy Model và Chat (quan trọng để tránh bị chặn).
+ * - Feature: Hỗ trợ Namespacing (Airforce/gpt-4o) và tự động strip prefix khi gọi upstream.
  */
 
-// =================================================================================
-// ⚙️ 1. Cấu hình & Biến môi trường
-// =================================================================================
-
-// Bun tự động load .env
-const API_KEY = process.env.API_KEY || 'default-secret-key';
+const API_KEY = process.env.API_KEY || '1'; // Default key: 1
 const PORT = process.env.PORT || 3000;
 
-// Cấu hình Upstream Providers
+// =================================================================================
+// 🛡️ 0. Cấu hình Headers Giả lập (QUAN TRỌNG)
+// =================================================================================
+
+// Bộ headers này copy chuẩn từ curl request của bạn để bypass Cloudflare/WAF
+const COMMON_HEADERS = {
+    'accept': '*/*',
+    'accept-language': 'vi-VN,vi;q=0.9',
+    'content-type': 'application/json',
+    'origin': 'https://g4f.dev',
+    'referer': 'https://g4f.dev/',
+    'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36',
+    'sec-ch-ua': '"Chromium";v="137", "Not/A)Brand";v="24"',
+    'sec-ch-ua-mobile': '?1',
+    'sec-ch-ua-platform': '"Android"',
+    'sec-fetch-dest': 'empty',
+    'sec-fetch-mode': 'cors',
+    'sec-fetch-site': 'cross-site'
+};
+
+// =================================================================================
+// ⚙️ 1. Cấu hình Providers
+// =================================================================================
+
 const PROVIDER_CONFIG = {
-  'api.airforce': {
+  'airforce': { 
     name: 'Airforce API',
     upstreamHost: 'api.airforce',
-    models: ['gpt-5-mini', 'gpt-4o-mini'], // Hardcoded models
+    modelsPath: '/v1/models',
     chatPath: '/v1/chat/completions'
   },
-  'anondrop.net': {
+  'anondrop': {
     name: 'AnonDrop',
     upstreamHost: 'anondrop.net',
     modelsPath: '/v1/models',
     chatPath: '/v1/chat/completions'
   },
-  'gpt4free.pro': {
+  'gpt4free': {
     name: 'GPT4Free.pro',
     upstreamHost: 'gpt4free.pro',
     modelsPath: '/v1/models',
@@ -40,18 +55,6 @@ const PROVIDER_CONFIG = {
     upstreamHost: 'g4f.dev',
     modelsPath: '/api/gemini/models',
     chatPath: '/api/gemini/chat/completions'
-  },
-  'grok': {
-    name: 'Grok (via g4f)',
-    upstreamHost: 'g4f.dev',
-    modelsPath: '/api/grok/models',
-    chatPath: '/api/grok/chat/completions'
-  },
-  'pollinations.ai': {
-    name: 'Pollinations.ai (via g4f)',
-    upstreamHost: 'g4f.dev',
-    modelsPath: '/api/pollinations.ai/models',
-    chatPath: '/api/pollinations.ai/chat/completions'
   },
   'ollama': {
     name: 'Ollama (via g4f)',
@@ -73,42 +76,30 @@ const PROVIDER_CONFIG = {
 
 let MODEL_PROVIDER_MAP = null;
 
-/**
- * Xây dựng map model -> provider.
- * Chạy 1 lần khi server khởi động hoặc request đầu tiên đến.
- */
 async function buildModelProviderMap() {
-  console.log("🚀 Đang xây dựng danh mục models...");
+  console.log("🚀 Đang cập nhật danh sách models...");
   const map = new Map();
 
-  const fetchPromises = Object.entries(PROVIDER_CONFIG).map(async ([providerId, config]) => {
+  const fetchPromises = Object.entries(PROVIDER_CONFIG).map(async ([providerKey, config]) => {
     try {
-      // 1. Xử lý model hardcode
-      if (config.models && !config.modelsPath) {
-        config.models.forEach(modelId => {
-          map.set(modelId, { providerId, upstreamHost: config.upstreamHost, chatPath: config.chatPath });
-        });
-        return;
-      }
+      let models = [];
 
-      // 2. Xử lý model động (fetch từ upstream)
-      if (config.modelsPath) {
+      // 1. Lấy danh sách model
+      if (config.models) {
+        models = config.models;
+      } else if (config.modelsPath) {
         const upstreamUrl = `https://${config.upstreamHost}${config.modelsPath}`;
-        const response = await fetch(upstreamUrl, {
-          method: 'GET',
-          headers: { 'Accept': 'application/json', 'Origin': 'https://g4f.dev', 'Referer': 'https://g4f.dev/' }
+        
+        // Dùng COMMON_HEADERS để tránh bị chặn khi lấy list
+        const response = await fetch(upstreamUrl, { 
+            method: 'GET', 
+            headers: COMMON_HEADERS 
         });
         
-        if (!response.ok) {
-          // Silent fail để không block các provider khác
-          // console.warn(`Provider '${providerId}' trả về status ${response.status}`);
-          return; 
-        }
-        
+        if (!response.ok) return;
         const data = await response.json();
-        let models = [];
-
-        // Parsing heuristic cho nhiều định dạng output khác nhau
+        
+        // Parsing logic đa dạng
         if (Array.isArray(data)) {
             models = data.map(m => m.id || m.name).filter(Boolean);
         } else if (data.data && Array.isArray(data.data)) {
@@ -116,75 +107,90 @@ async function buildModelProviderMap() {
         } else if (data.models && Array.isArray(data.models)) {
             models = data.models.map(m => m.name).filter(Boolean);
         }
-       
-        models.forEach(modelId => {
-          map.set(modelId, { providerId, upstreamHost: config.upstreamHost, chatPath: config.chatPath });
-        });
       }
+
+      // 2. Lưu vào Map (Lưu cả tên gốc và tên có prefix)
+      models.forEach(originalModelId => {
+        const providerData = { 
+            providerId: providerKey, 
+            upstreamHost: config.upstreamHost, 
+            chatPath: config.chatPath,
+            targetModelId: originalModelId // ID gốc để gửi đi
+        };
+
+        // Key 1: Có prefix (Ví dụ: airforce/gpt-4o)
+        map.set(`${providerKey}/${originalModelId}`, providerData);
+
+        // Key 2: Không prefix (Ví dụ: gpt-4o) - Fallback cho client cũ
+        // Chỉ set nếu chưa có (ưu tiên provider đầu tiên trong list)
+        if (!map.has(originalModelId)) {
+            map.set(originalModelId, providerData);
+        }
+      });
+      console.log(`  -> [${providerKey}] OK: ${models.length} models`);
+
     } catch (error) {
-      console.error(`Lỗi fetch provider '${providerId}': ${error.message}`);
+      console.error(`  -> [${providerKey}] Error: ${error.message}`);
     }
   });
 
   await Promise.allSettled(fetchPromises);
   MODEL_PROVIDER_MAP = map;
-  console.log(`✅ Đã xây dựng xong map. Tổng số model: ${MODEL_PROVIDER_MAP.size}`);
+  console.log(`✅ Hoàn tất. Tổng entries: ${MODEL_PROVIDER_MAP.size}`);
 }
 
 // =================================================================================
-// 🔌 3. Request Handlers
+// 🔌 3. Chat Handler (Fixed)
 // =================================================================================
 
 async function handleChatCompletionRequest(req) {
-  if (req.method !== 'POST') {
-    return new Response('Method Not Allowed', { status: 405 });
-  }
+  if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
 
-  // Auth check
+  // 1. Auth Check
   const authHeader = req.headers.get('Authorization');
   if (!authHeader || authHeader !== `Bearer ${API_KEY}`) {
-    return new Response(JSON.stringify({ error: 'Unauthorized', message: 'Invalid API Key' }), { 
-        status: 401,
-        headers: { 'Content-Type': 'application/json' }
+    return new Response(JSON.stringify({ error: 'Unauthorized' }), { 
+        status: 401, headers: { 'Content-Type': 'application/json' }
     });
   }
 
   try {
+      // 2. Parse Body & Validate Model
       const requestBody = await req.json();
-      const modelId = requestBody.model;
+      const incomingModelId = requestBody.model;
 
-      if (!modelId) {
-        return new Response(JSON.stringify({ error: 'Bad Request', message: 'Missing "model" field' }), { status: 400 });
+      if (!incomingModelId) {
+        return new Response(JSON.stringify({ error: 'Missing model' }), { status: 400 });
       }
 
-      const providerInfo = MODEL_PROVIDER_MAP.get(modelId);
+      const providerInfo = MODEL_PROVIDER_MAP.get(incomingModelId);
 
       if (!providerInfo) {
         return new Response(JSON.stringify({ 
             error: 'Model Not Found', 
-            message: `Model '${modelId}' không tồn tại. Kiểm tra /v1/models.` 
+            message: `Model '${incomingModelId}' không tồn tại. Hãy kiểm tra /v1/models` 
         }), { status: 404, headers: { 'Content-Type': 'application/json' } });
       }
 
-      const { upstreamHost, chatPath } = providerInfo;
+      // 3. Chuẩn bị Request Upstream
+      const { upstreamHost, chatPath, targetModelId } = providerInfo;
       const upstreamUrl = `https://${upstreamHost}${chatPath}`;
 
-      // Headers giả lập browser để tránh bị chặn
-      const headers = new Headers();
-      headers.set('Content-Type', 'application/json');
-      headers.set('Accept', '*/*');
-      headers.set('Origin', 'https://g4f.dev');
-      headers.set('Referer', 'https://g4f.dev/');
-      headers.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+      // ⚠️ QUAN TRỌNG: Thay thế model ID bằng ID gốc (bỏ prefix)
+      const upstreamBody = {
+          ...requestBody,
+          model: targetModelId 
+      };
 
+      // 4. Gửi Request với COMMON_HEADERS đầy đủ
       const upstreamResponse = await fetch(upstreamUrl, {
         method: 'POST',
-        headers: headers,
-        body: JSON.stringify(requestBody),
+        headers: COMMON_HEADERS, // Dùng lại bộ headers chuẩn
+        body: JSON.stringify(upstreamBody),
         redirect: 'follow'
       });
 
-      // Proxy response (hỗ trợ streaming)
+      // 5. Proxy Response về client
       return new Response(upstreamResponse.body, {
         status: upstreamResponse.status,
         statusText: upstreamResponse.statusText,
@@ -192,37 +198,21 @@ async function handleChatCompletionRequest(req) {
           'Content-Type': upstreamResponse.headers.get('Content-Type') || 'text/event-stream',
           'Access-Control-Allow-Origin': '*',
           'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive'
         }
       });
 
   } catch (error) {
+      console.error("Chat Error:", error);
       return new Response(JSON.stringify({ error: 'Internal Error', message: error.message }), { status: 500 });
   }
 }
 
-function handleModelsRequest() {
-  if (!MODEL_PROVIDER_MAP) {
-    return new Response(JSON.stringify({ error: 'Service Unavailable', message: 'Models loading...' }), { status: 503 });
-  }
-
-  const modelsData = Array.from(MODEL_PROVIDER_MAP.entries()).map(([id, { providerId }]) => ({
-    id,
-    object: 'model',
-    owned_by: providerId,
-  }));
-
-  return new Response(JSON.stringify({ object: 'list', data: modelsData }), {
-    headers: { 'Content-Type': 'application/json' },
-  });
-}
-
 // =================================================================================
-// 🚀 4. Bun Server Entry Point
+// 🚀 4. Server Entry
 // =================================================================================
 
-console.log(`🚀 Starting Bun AI Gateway on port ${PORT}...`);
-
-// Pre-load map (non-blocking, server sẽ start ngay nhưng request đầu có thể phải đợi nếu map chưa xong)
+console.log(`🚀 Starting Bun AI Gateway v3.3 on port ${PORT}...`);
 buildModelProviderMap();
 
 Bun.serve({
@@ -230,7 +220,7 @@ Bun.serve({
   async fetch(req) {
     const url = new URL(req.url);
 
-    // CORS Preflight
+    // CORS Handling
     if (req.method === 'OPTIONS') {
         return new Response(null, {
             headers: {
@@ -241,27 +231,41 @@ Bun.serve({
         });
     }
 
-    // Đảm bảo map đã load trước khi xử lý request
-    if (MODEL_PROVIDER_MAP === null) {
-      await buildModelProviderMap();
-    }
+    // Lazy Loading Map
+    if (MODEL_PROVIDER_MAP === null) await buildModelProviderMap();
 
     // Routing
     if (url.pathname === '/v1/models') {
-      return handleModelsRequest();
+        return handleModelsRequest();
     }
-
+    
     if (url.pathname === '/v1/chat/completions') {
-      return handleChatCompletionRequest(req);
+        return handleChatCompletionRequest(req);
     }
 
-    // Health check / Root
     if (url.pathname === '/') {
-        return new Response(JSON.stringify({ status: 'ok', service: 'Bun AI Gateway v3.0', models_count: MODEL_PROVIDER_MAP ? MODEL_PROVIDER_MAP.size : 0 }), {
-            headers: { 'Content-Type': 'application/json' }
-        });
+        return new Response(JSON.stringify({ 
+            status: 'ok', 
+            service: 'Bun AI Gateway v3.3', 
+            models_count: MODEL_PROVIDER_MAP ? MODEL_PROVIDER_MAP.size : 0 
+        }), { headers: { 'Content-Type': 'application/json' }});
     }
 
     return new Response('Not Found', { status: 404 });
   },
 });
+
+function handleModelsRequest() {
+  if (!MODEL_PROVIDER_MAP) return new Response('{}', { status: 503 });
+
+  // Trả về danh sách tất cả model (gồm cả tên gốc và tên có prefix)
+  const modelsData = Array.from(MODEL_PROVIDER_MAP.entries()).map(([id, info]) => ({
+    id: id, 
+    object: 'model',
+    owned_by: info.providerId,
+  }));
+
+  return new Response(JSON.stringify({ object: 'list', data: modelsData }), {
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
