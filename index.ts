@@ -1,15 +1,15 @@
 /**
- * Bun AI Gateway v4.1 (Image Generation Edition)
- * - Added: Endpoint /v1/images/generations.
- * - Feature: Direct Image Streaming (Trả ảnh trực tiếp).
- * - Providers: Updated configs with imagePaths.
+ * Bun AI Gateway v4.3 (Worker Dynamic Fixed)
+ * - Logic: Cập nhật parser để đọc cấu trúc JSON { success: true, result: [...] } của Worker.
+ * - Result: Tự động load ~30+ models từ Worker (DeepSeek, Llama 3, Flux, etc.).
+ * - Headers: Optimized based on latest user curl.
  */
 
 const API_KEY = process.env.API_KEY || '1'; 
 const PORT = process.env.PORT || 3000;
 
 // =================================================================================
-// 🛡️ 0. Headers Giả lập (Anti-Block)
+// 🛡️ 0. Headers Giả lập (Strictly matched)
 // =================================================================================
 const COMMON_HEADERS = {
     'accept': '*/*',
@@ -27,16 +27,17 @@ const COMMON_HEADERS = {
 };
 
 // =================================================================================
-// ⚙️ 1. Cấu hình Providers (Thêm imagePath)
+// ⚙️ 1. Cấu hình Providers
 // =================================================================================
 
 const PROVIDER_CONFIG = {
+  // ✅ 1. Worker (Dynamic fetch enabled)
   'worker': {
-    name: 'Worker',
+    name: 'Worker (Cloudflare)',
     upstreamHost: 'g4f.dev',
     modelsPath: '/api/worker/models',
     chatPath: '/api/worker/chat/completions',
-    imagePath: '/api/worker/images/generations' // ✅ Support Images
+    imagePath: '/api/worker/images/generations' 
   },
   'openrouter': {
     name: 'OpenRouter',
@@ -57,23 +58,8 @@ const PROVIDER_CONFIG = {
     upstreamHost: 'api.airforce',
     modelsPath: '/v1/models', 
     chatPath: '/v1/chat/completions',
-    imagePath: '/v1/images/generations' // Airforce cũng có endpoint này
+    imagePath: '/v1/images/generations'
   },
-  'pollinations': {
-    name: 'Pollinations',
-    upstreamHost: 'g4f.dev',
-    modelsPath: '/api/pollinations.ai/models',
-    chatPath: '/api/pollinations.ai/chat/completions',
-    imagePath: '/api/pollinations.ai/images/generations'
-  },
-  'gemini': {
-    name: 'Gemini',
-    upstreamHost: 'g4f.dev',
-    modelsPath: '/api/gemini/models',
-    chatPath: '/api/gemini/chat/completions',
-    imagePath: '/api/gemini/images/generations'
-  },
-  // Các provider sau thường chỉ support text, nhưng cứ thêm config để dự phòng
   'gpt4free': {
     name: 'GPT4Free',
     upstreamHost: 'gpt4free.pro',
@@ -88,12 +74,26 @@ const PROVIDER_CONFIG = {
     chatPath: '/v1/chat/completions',
     imagePath: '/v1/images/generations'
   },
+  'gemini': {
+    name: 'Gemini',
+    upstreamHost: 'g4f.dev',
+    modelsPath: '/api/gemini/models',
+    chatPath: '/api/gemini/chat/completions',
+    imagePath: '/api/gemini/images/generations'
+  },
   'grok': {
     name: 'Grok',
     upstreamHost: 'g4f.dev',
     modelsPath: '/api/grok/models',
     chatPath: '/api/grok/chat/completions',
     imagePath: '/api/grok/images/generations'
+  },
+  'pollinations': {
+    name: 'Pollinations',
+    upstreamHost: 'g4f.dev',
+    modelsPath: '/api/pollinations.ai/models',
+    chatPath: '/api/pollinations.ai/chat/completions',
+    imagePath: '/api/pollinations.ai/images/generations'
   },
   'ollama': {
     name: 'Ollama',
@@ -105,7 +105,7 @@ const PROVIDER_CONFIG = {
 };
 
 // =================================================================================
-// 🧠 2. Core Logic: Model Map Builder
+// 🧠 2. Core Logic: Model Map Builder (Updated Parser)
 // =================================================================================
 
 let MODEL_PROVIDER_MAP = null;
@@ -120,16 +120,33 @@ async function buildModelProviderMap() {
       if (config.modelsPath) {
         const upstreamUrl = `https://${config.upstreamHost}${config.modelsPath}`;
         const response = await fetch(upstreamUrl, { method: 'GET', headers: COMMON_HEADERS });
+        
         if (response.ok) {
             const data = await response.json();
-            if (Array.isArray(data)) {
+            
+            // --- PARSING LOGIC CẬP NHẬT ---
+            if (data.success && Array.isArray(data.result)) {
+                // ✅ Case: Worker (g4f) trả về { success: true, result: [{name: ...}] }
+                models = data.result.map(m => m.name).filter(Boolean);
+            } 
+            else if (Array.isArray(data)) {
+                // Case: HuggingFace/Pollinations ([...])
                 models = data.map(m => m.id || m.name).filter(Boolean);
-            } else if (data.data && Array.isArray(data.data)) {
+            } 
+            else if (data.data && Array.isArray(data.data)) {
+                // Case: OpenAI Standard / Azure ({ data: [...] })
                 models = data.data.map(m => m.id).filter(Boolean);
-            } else if (data.models && Array.isArray(data.models)) {
+            } 
+            else if (data.models && Array.isArray(data.models)) {
+                // Case: Ollama ({ models: [...] })
                 models = data.models.map(m => m.name).filter(Boolean);
             }
         }
+      }
+
+      // Xử lý Fallback nếu cần (nhưng với Worker fix trên thì không cần nữa)
+      if (models.length === 0 && config.fallbackModels) {
+          models = config.fallbackModels;
       }
 
       models.forEach(originalModelId => {
@@ -138,7 +155,7 @@ async function buildModelProviderMap() {
             providerId: providerKey, 
             upstreamHost: config.upstreamHost, 
             chatPath: config.chatPath,
-            imagePath: config.imagePath, // ✅ Lưu thêm imagePath vào Map
+            imagePath: config.imagePath,
             targetModelId: originalModelId 
         });
       });
@@ -159,7 +176,6 @@ async function buildModelProviderMap() {
 // 🔌 3. Request Handlers
 // =================================================================================
 
-// --- Chat Handler ---
 async function handleChatCompletionRequest(req) {
   if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
   const authHeader = req.headers.get('Authorization');
@@ -196,50 +212,34 @@ async function handleChatCompletionRequest(req) {
   }
 }
 
-// --- Image Handler (NEW) ---
 async function handleImageGenerationRequest(req) {
     if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
-    
-    // Auth Check
     const authHeader = req.headers.get('Authorization');
     if (!authHeader || authHeader !== `Bearer ${API_KEY}`) return new Response('Unauthorized', { status: 401 });
 
     try {
         const requestBody = await req.json();
         const incomingModelId = requestBody.model; 
-
         if (!incomingModelId) return new Response('Missing model', { status: 400 });
 
-        // Lookup Provider
         const providerInfo = MODEL_PROVIDER_MAP.get(incomingModelId);
-        
-        // Validation
-        if (!providerInfo) {
-             return new Response(`Model '${incomingModelId}' not found in registry.`, { status: 404 });
-        }
-        if (!providerInfo.imagePath) {
-            return new Response(`Provider '${providerInfo.providerId}' does not support image generation.`, { status: 400 });
+        if (!providerInfo || !providerInfo.imagePath) {
+             return new Response(`Model '${incomingModelId}' not support image gen.`, { status: 404 });
         }
 
         const upstreamUrl = `https://${providerInfo.upstreamHost}${providerInfo.imagePath}`;
-        
-        // Strip Prefix
         const upstreamBody = { 
             model: providerInfo.targetModelId, 
             prompt: requestBody.prompt,
-            response_format: requestBody.response_format // Optional
+            response_format: requestBody.response_format 
         };
 
-        // Fetch Image
-        // Note: API này trả về binary data (blob) trực tiếp
         const upstreamResponse = await fetch(upstreamUrl, {
             method: 'POST',
             headers: COMMON_HEADERS,
             body: JSON.stringify(upstreamBody)
         });
 
-        // Pipe trực tiếp luồng ảnh về client
-        // Giữ nguyên Content-Type (image/jpeg, etc.) từ upstream
         return new Response(upstreamResponse.body, {
             status: upstreamResponse.status,
             headers: {
@@ -258,7 +258,7 @@ async function handleImageGenerationRequest(req) {
 // 🚀 4. Server Entry
 // =================================================================================
 
-console.log(`🚀 Starting Bun AI Gateway v4.1 on port ${PORT}...`);
+console.log(`🚀 Starting Bun AI Gateway v4.3 on port ${PORT}...`);
 buildModelProviderMap();
 
 Bun.serve({
@@ -278,16 +278,14 @@ Bun.serve({
 
     if (MODEL_PROVIDER_MAP === null) await buildModelProviderMap();
 
-    // Routes
     if (url.pathname === '/v1/models') return handleModelsRequest();
     if (url.pathname === '/v1/chat/completions') return handleChatCompletionRequest(req);
-    if (url.pathname === '/v1/images/generations') return handleImageGenerationRequest(req); // ✅ New Route
+    if (url.pathname === '/v1/images/generations') return handleImageGenerationRequest(req);
     
     if (url.pathname === '/') {
         return new Response(JSON.stringify({ 
             status: 'ok', 
-            service: 'Bun AI Gateway v4.1',
-            features: ['chat', 'images'],
+            service: 'Bun AI Gateway v4.3',
             models_count: MODEL_PROVIDER_MAP ? MODEL_PROVIDER_MAP.size : 0 
         }), { headers: { 'Content-Type': 'application/json' }});
     }
