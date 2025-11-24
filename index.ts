@@ -1,21 +1,20 @@
 /**
- * Bun AI Gateway v3.8 (Azure Edition)
- * - Added: Azure Provider (via g4f).
- * - Updated: Headers khớp 100% với curl mẫu (Referer: pro.html) để bypass firewall.
- * - Logic: Vẫn giữ Strict Namespace (provider/model).
+ * Bun AI Gateway v4.1 (Image Generation Edition)
+ * - Added: Endpoint /v1/images/generations.
+ * - Feature: Direct Image Streaming (Trả ảnh trực tiếp).
+ * - Providers: Updated configs with imagePaths.
  */
 
 const API_KEY = process.env.API_KEY || '1'; 
 const PORT = process.env.PORT || 3000;
 
 // =================================================================================
-// 🛡️ 0. Headers Giả lập (Updated from Azure curl)
+// 🛡️ 0. Headers Giả lập (Anti-Block)
 // =================================================================================
 const COMMON_HEADERS = {
     'accept': '*/*',
     'accept-language': 'vi-VN,vi;q=0.9',
     'content-type': 'application/json',
-    // Lưu ý: Referer này quan trọng cho endpoint Azure của g4f
     'origin': 'https://g4f.dev',
     'referer': 'https://g4f.dev/chat/pro.html', 
     'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36',
@@ -24,69 +23,84 @@ const COMMON_HEADERS = {
     'sec-ch-ua-platform': '"Android"',
     'sec-fetch-dest': 'empty',
     'sec-fetch-mode': 'cors',
-    'sec-fetch-site': 'same-origin' // Đổi thành same-origin theo mẫu curl
+    'sec-fetch-site': 'same-origin'
 };
 
 // =================================================================================
-// ⚙️ 1. Cấu hình Providers (8 Nguồn)
+// ⚙️ 1. Cấu hình Providers (Thêm imagePath)
 // =================================================================================
 
 const PROVIDER_CONFIG = {
-  // ✅ 1. Azure (Mới thêm)
+  'worker': {
+    name: 'Worker',
+    upstreamHost: 'g4f.dev',
+    modelsPath: '/api/worker/models',
+    chatPath: '/api/worker/chat/completions',
+    imagePath: '/api/worker/images/generations' // ✅ Support Images
+  },
+  'openrouter': {
+    name: 'OpenRouter',
+    upstreamHost: 'g4f.dev',
+    modelsPath: '/api/openrouter/models',
+    chatPath: '/api/openrouter/chat/completions',
+    imagePath: '/api/openrouter/images/generations'
+  },
   'azure': {
-    name: 'Azure (via g4f)',
+    name: 'Azure',
     upstreamHost: 'g4f.dev',
     modelsPath: '/api/azure/models',
-    chatPath: '/api/azure/chat/completions'
+    chatPath: '/api/azure/chat/completions',
+    imagePath: '/api/azure/images/generations'
   },
-  // 2. Airforce
   'airforce': { 
-    name: 'Airforce API',
+    name: 'Airforce',
     upstreamHost: 'api.airforce',
     modelsPath: '/v1/models', 
-    chatPath: '/v1/chat/completions'
+    chatPath: '/v1/chat/completions',
+    imagePath: '/v1/images/generations' // Airforce cũng có endpoint này
   },
-  // 3. AnonDrop
+  'pollinations': {
+    name: 'Pollinations',
+    upstreamHost: 'g4f.dev',
+    modelsPath: '/api/pollinations.ai/models',
+    chatPath: '/api/pollinations.ai/chat/completions',
+    imagePath: '/api/pollinations.ai/images/generations'
+  },
+  'gemini': {
+    name: 'Gemini',
+    upstreamHost: 'g4f.dev',
+    modelsPath: '/api/gemini/models',
+    chatPath: '/api/gemini/chat/completions',
+    imagePath: '/api/gemini/images/generations'
+  },
+  // Các provider sau thường chỉ support text, nhưng cứ thêm config để dự phòng
+  'gpt4free': {
+    name: 'GPT4Free',
+    upstreamHost: 'gpt4free.pro',
+    modelsPath: '/v1/models',
+    chatPath: '/v1/chat/completions',
+    imagePath: '/v1/images/generations'
+  },
   'anondrop': {
     name: 'AnonDrop',
     upstreamHost: 'anondrop.net',
     modelsPath: '/v1/models',
-    chatPath: '/v1/chat/completions'
+    chatPath: '/v1/chat/completions',
+    imagePath: '/v1/images/generations'
   },
-  // 4. GPT4Free
-  'gpt4free': {
-    name: 'GPT4Free.pro',
-    upstreamHost: 'gpt4free.pro',
-    modelsPath: '/v1/models',
-    chatPath: '/v1/chat/completions'
-  },
-  // 5. Gemini
-  'gemini': {
-    name: 'Google Gemini',
-    upstreamHost: 'g4f.dev',
-    modelsPath: '/api/gemini/models',
-    chatPath: '/api/gemini/chat/completions'
-  },
-  // 6. Grok
   'grok': {
     name: 'Grok',
     upstreamHost: 'g4f.dev',
     modelsPath: '/api/grok/models',
-    chatPath: '/api/grok/chat/completions'
+    chatPath: '/api/grok/chat/completions',
+    imagePath: '/api/grok/images/generations'
   },
-  // 7. Pollinations
-  'pollinations': {
-    name: 'Pollinations.ai',
-    upstreamHost: 'g4f.dev',
-    modelsPath: '/api/pollinations.ai/models',
-    chatPath: '/api/pollinations.ai/chat/completions'
-  },
-  // 8. Ollama
   'ollama': {
     name: 'Ollama',
     upstreamHost: 'g4f.dev',
     modelsPath: '/api/ollama/models',
-    chatPath: '/api/ollama/chat/completions'
+    chatPath: '/api/ollama/chat/completions',
+    imagePath: '/api/ollama/images/generations'
   }
 };
 
@@ -97,30 +111,20 @@ const PROVIDER_CONFIG = {
 let MODEL_PROVIDER_MAP = null;
 
 async function buildModelProviderMap() {
-  console.log("🚀 Đang cập nhật danh sách models (8 Providers)...");
+  console.log("🚀 Đang cập nhật danh sách models...");
   const map = new Map();
 
   const fetchPromises = Object.entries(PROVIDER_CONFIG).map(async ([providerKey, config]) => {
     try {
       let models = [];
-
-      // Fetch từ Upstream
       if (config.modelsPath) {
         const upstreamUrl = `https://${config.upstreamHost}${config.modelsPath}`;
-        
-        const response = await fetch(upstreamUrl, { 
-            method: 'GET', 
-            headers: COMMON_HEADERS 
-        });
-        
+        const response = await fetch(upstreamUrl, { method: 'GET', headers: COMMON_HEADERS });
         if (response.ok) {
             const data = await response.json();
-            
-            // Parsing Logic
             if (Array.isArray(data)) {
                 models = data.map(m => m.id || m.name).filter(Boolean);
             } else if (data.data && Array.isArray(data.data)) {
-                // Azure trả về {"data":[{"id":"model-router"}]} -> Khớp logic này
                 models = data.data.map(m => m.id).filter(Boolean);
             } else if (data.models && Array.isArray(data.models)) {
                 models = data.models.map(m => m.name).filter(Boolean);
@@ -128,23 +132,18 @@ async function buildModelProviderMap() {
         }
       }
 
-      // Đăng ký vào Map (Format: provider/model)
       models.forEach(originalModelId => {
         const namespacedId = `${providerKey}/${originalModelId}`;
-        
         map.set(namespacedId, { 
             providerId: providerKey, 
             upstreamHost: config.upstreamHost, 
             chatPath: config.chatPath,
+            imagePath: config.imagePath, // ✅ Lưu thêm imagePath vào Map
             targetModelId: originalModelId 
         });
       });
       
-      if (models.length > 0) {
-          console.log(`  -> [${providerKey}] OK: ${models.length} models`);
-      } else {
-          // console.log(`  -> [${providerKey}] Không tìm thấy models.`);
-      }
+      if (models.length > 0) console.log(`  -> [${providerKey}] OK: ${models.length} models`);
 
     } catch (error) {
       console.error(`  -> [${providerKey}] Error: ${error.message}`);
@@ -157,44 +156,25 @@ async function buildModelProviderMap() {
 }
 
 // =================================================================================
-// 🔌 3. Chat Handler
+// 🔌 3. Request Handlers
 // =================================================================================
 
+// --- Chat Handler ---
 async function handleChatCompletionRequest(req) {
   if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
-
   const authHeader = req.headers.get('Authorization');
-  if (!authHeader || authHeader !== `Bearer ${API_KEY}`) {
-    return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 });
-  }
+  if (!authHeader || authHeader !== `Bearer ${API_KEY}`) return new Response('Unauthorized', { status: 401 });
 
   try {
       const requestBody = await req.json();
       const incomingModelId = requestBody.model; 
-
-      if (!incomingModelId) {
-        return new Response(JSON.stringify({ error: 'Missing model' }), { status: 400 });
-      }
+      if (!incomingModelId) return new Response('Missing model', { status: 400 });
 
       const providerInfo = MODEL_PROVIDER_MAP.get(incomingModelId);
+      if (!providerInfo) return new Response(`Model '${incomingModelId}' not found.`, { status: 404 });
 
-      if (!providerInfo) {
-        return new Response(JSON.stringify({ 
-            error: 'Model Not Found', 
-            message: `Model '${incomingModelId}' không tồn tại. Format đúng: 'provider/model'.` 
-        }), { status: 404, headers: { 'Content-Type': 'application/json' } });
-      }
-
-      const { upstreamHost, chatPath, targetModelId } = providerInfo;
-      const upstreamUrl = `https://${upstreamHost}${chatPath}`;
-
-      // Strip Prefix
-      const upstreamBody = {
-          ...requestBody,
-          model: targetModelId 
-      };
-
-      // console.log(`🔄 Routing: ${incomingModelId} -> ${upstreamHost}`);
+      const upstreamUrl = `https://${providerInfo.upstreamHost}${providerInfo.chatPath}`;
+      const upstreamBody = { ...requestBody, model: providerInfo.targetModelId };
 
       const upstreamResponse = await fetch(upstreamUrl, {
         method: 'POST',
@@ -211,17 +191,74 @@ async function handleChatCompletionRequest(req) {
           'Cache-Control': 'no-cache'
         }
       });
-
   } catch (error) {
-      return new Response(JSON.stringify({ error: 'Internal Error', message: error.message }), { status: 500 });
+      return new Response(JSON.stringify({ error: error.message }), { status: 500 });
   }
+}
+
+// --- Image Handler (NEW) ---
+async function handleImageGenerationRequest(req) {
+    if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
+    
+    // Auth Check
+    const authHeader = req.headers.get('Authorization');
+    if (!authHeader || authHeader !== `Bearer ${API_KEY}`) return new Response('Unauthorized', { status: 401 });
+
+    try {
+        const requestBody = await req.json();
+        const incomingModelId = requestBody.model; 
+
+        if (!incomingModelId) return new Response('Missing model', { status: 400 });
+
+        // Lookup Provider
+        const providerInfo = MODEL_PROVIDER_MAP.get(incomingModelId);
+        
+        // Validation
+        if (!providerInfo) {
+             return new Response(`Model '${incomingModelId}' not found in registry.`, { status: 404 });
+        }
+        if (!providerInfo.imagePath) {
+            return new Response(`Provider '${providerInfo.providerId}' does not support image generation.`, { status: 400 });
+        }
+
+        const upstreamUrl = `https://${providerInfo.upstreamHost}${providerInfo.imagePath}`;
+        
+        // Strip Prefix
+        const upstreamBody = { 
+            model: providerInfo.targetModelId, 
+            prompt: requestBody.prompt,
+            response_format: requestBody.response_format // Optional
+        };
+
+        // Fetch Image
+        // Note: API này trả về binary data (blob) trực tiếp
+        const upstreamResponse = await fetch(upstreamUrl, {
+            method: 'POST',
+            headers: COMMON_HEADERS,
+            body: JSON.stringify(upstreamBody)
+        });
+
+        // Pipe trực tiếp luồng ảnh về client
+        // Giữ nguyên Content-Type (image/jpeg, etc.) từ upstream
+        return new Response(upstreamResponse.body, {
+            status: upstreamResponse.status,
+            headers: {
+                'Content-Type': upstreamResponse.headers.get('Content-Type') || 'image/jpeg',
+                'Access-Control-Allow-Origin': '*',
+                'Cache-Control': 'no-cache'
+            }
+        });
+
+    } catch (error) {
+        return new Response(JSON.stringify({ error: error.message }), { status: 500 });
+    }
 }
 
 // =================================================================================
 // 🚀 4. Server Entry
 // =================================================================================
 
-console.log(`🚀 Starting Bun AI Gateway v3.8 on port ${PORT}...`);
+console.log(`🚀 Starting Bun AI Gateway v4.1 on port ${PORT}...`);
 buildModelProviderMap();
 
 Bun.serve({
@@ -241,13 +278,16 @@ Bun.serve({
 
     if (MODEL_PROVIDER_MAP === null) await buildModelProviderMap();
 
+    // Routes
     if (url.pathname === '/v1/models') return handleModelsRequest();
     if (url.pathname === '/v1/chat/completions') return handleChatCompletionRequest(req);
+    if (url.pathname === '/v1/images/generations') return handleImageGenerationRequest(req); // ✅ New Route
     
     if (url.pathname === '/') {
         return new Response(JSON.stringify({ 
             status: 'ok', 
-            service: 'Bun AI Gateway v3.8',
+            service: 'Bun AI Gateway v4.1',
+            features: ['chat', 'images'],
             models_count: MODEL_PROVIDER_MAP ? MODEL_PROVIDER_MAP.size : 0 
         }), { headers: { 'Content-Type': 'application/json' }});
     }
@@ -258,13 +298,11 @@ Bun.serve({
 
 function handleModelsRequest() {
   if (!MODEL_PROVIDER_MAP) return new Response('{}', { status: 503 });
-
   const modelsData = Array.from(MODEL_PROVIDER_MAP.entries()).map(([id, info]) => ({
     id: id,
     object: 'model',
     owned_by: info.providerId,
   }));
-
   return new Response(JSON.stringify({ object: 'list', data: modelsData }), {
     headers: { 'Content-Type': 'application/json' },
   });
