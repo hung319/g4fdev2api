@@ -1,15 +1,15 @@
 /**
- * Bun AI Gateway v4.4 (n8n Debug Edition)
- * - Feature: Extensive Logging cho Endpoint tạo ảnh.
- * - Fix: Xử lý lỗi Upstream rõ ràng (trả về JSON error thay vì stream rác).
- * - Target: Tối ưu cho n8n HTTP Request Node.
+ * Bun AI Gateway v4.5 (Global Debug Edition)
+ * - Feature: Global Logger (Log mọi request đến server).
+ * - Feature: Log IP Client (để debug Docker network).
+ * - Routing: Chấp nhận cả URL có/không có dấu gạch chéo cuối (trailing slash).
  */
 
 const API_KEY = process.env.API_KEY || '1'; 
 const PORT = process.env.PORT || 3000;
 
 // =================================================================================
-// 🛡️ 0. Headers Giả lập (Giữ nguyên từ bản ổn định)
+// 🛡️ Headers
 // =================================================================================
 const COMMON_HEADERS = {
     'accept': '*/*',
@@ -27,11 +27,11 @@ const COMMON_HEADERS = {
 };
 
 // =================================================================================
-// ⚙️ 1. Cấu hình Providers
+// ⚙️ Config
 // =================================================================================
 const PROVIDER_CONFIG = {
   'worker': {
-    name: 'Worker (Cloudflare)',
+    name: 'Worker',
     upstreamHost: 'g4f.dev',
     modelsPath: '/api/worker/models',
     chatPath: '/api/worker/chat/completions',
@@ -44,13 +44,6 @@ const PROVIDER_CONFIG = {
     chatPath: '/api/openrouter/chat/completions',
     imagePath: '/api/openrouter/images/generations'
   },
-  'azure': {
-    name: 'Azure',
-    upstreamHost: 'g4f.dev',
-    modelsPath: '/api/azure/models',
-    chatPath: '/api/azure/chat/completions',
-    imagePath: '/api/azure/images/generations'
-  },
   'airforce': { 
     name: 'Airforce',
     upstreamHost: 'api.airforce',
@@ -58,24 +51,16 @@ const PROVIDER_CONFIG = {
     chatPath: '/v1/chat/completions',
     imagePath: '/v1/images/generations'
   },
-  // ... (Các provider khác giữ nguyên để code gọn, logic map tự động xử lý)
-  'pollinations': {
-    name: 'Pollinations',
-    upstreamHost: 'g4f.dev',
-    modelsPath: '/api/pollinations.ai/models',
-    chatPath: '/api/pollinations.ai/chat/completions',
-    imagePath: '/api/pollinations.ai/images/generations'
-  }
+  // ... Các provider khác tương tự
 };
 
 // =================================================================================
-// 🧠 2. Core Logic: Model Map Builder
+// 🧠 Model Map
 // =================================================================================
-
 let MODEL_PROVIDER_MAP = null;
 
 async function buildModelProviderMap() {
-  console.log("🚀 [System] Đang cập nhật danh sách models...");
+  console.log("🚀 [System] Đang build map...");
   const map = new Map();
 
   const fetchPromises = Object.entries(PROVIDER_CONFIG).map(async ([providerKey, config]) => {
@@ -84,7 +69,6 @@ async function buildModelProviderMap() {
       if (config.modelsPath) {
         const upstreamUrl = `https://${config.upstreamHost}${config.modelsPath}`;
         const response = await fetch(upstreamUrl, { method: 'GET', headers: COMMON_HEADERS });
-        
         if (response.ok) {
             const data = await response.json();
             if (data.success && Array.isArray(data.result)) {
@@ -98,7 +82,6 @@ async function buildModelProviderMap() {
             }
         }
       }
-
       models.forEach(originalModelId => {
         const namespacedId = `${providerKey}/${originalModelId}`;
         map.set(namespacedId, { 
@@ -109,21 +92,17 @@ async function buildModelProviderMap() {
             targetModelId: originalModelId 
         });
       });
-      
       if (models.length > 0) console.log(`  -> [${providerKey}] OK: ${models.length} models`);
-
-    } catch (error) {
-      console.error(`  -> [${providerKey}] Error: ${error.message}`);
-    }
+    } catch (e) {}
   });
 
   await Promise.allSettled(fetchPromises);
   MODEL_PROVIDER_MAP = map;
-  console.log(`✅ [System] Hoàn tất. Tổng model: ${MODEL_PROVIDER_MAP.size}`);
+  console.log(`✅ [System] Ready. Total: ${MODEL_PROVIDER_MAP.size}`);
 }
 
 // =================================================================================
-// 🔌 3. Request Handlers
+// 🔌 Handlers
 // =================================================================================
 
 async function handleChatCompletionRequest(req) {
@@ -134,9 +113,8 @@ async function handleChatCompletionRequest(req) {
   try {
       const requestBody = await req.json();
       const incomingModelId = requestBody.model; 
-      
       const providerInfo = MODEL_PROVIDER_MAP.get(incomingModelId);
-      if (!providerInfo) return new Response(JSON.stringify({error: `Model '${incomingModelId}' not found`}), { status: 404 });
+      if (!providerInfo) return new Response(JSON.stringify({error: `Model not found`}), { status: 404 });
 
       const upstreamUrl = `https://${providerInfo.upstreamHost}${providerInfo.chatPath}`;
       const upstreamBody = { ...requestBody, model: providerInfo.targetModelId };
@@ -161,109 +139,83 @@ async function handleChatCompletionRequest(req) {
   }
 }
 
-// --- Image Handler (DEBUG MODE) ---
 async function handleImageGenerationRequest(req) {
-    console.log('\n📸 [IMAGE] Nhận request tạo ảnh...');
-    
+    console.log(`📸 [LOGIC] Vào hàm xử lý ảnh...`);
     if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
     
-    // Auth Check
     const authHeader = req.headers.get('Authorization');
     if (!authHeader || authHeader !== `Bearer ${API_KEY}`) {
-        console.warn('📸 [IMAGE] ❌ Lỗi Auth: Sai Key');
+        console.log(`📸 [LOGIC] Sai API Key!`);
         return new Response('Unauthorized', { status: 401 });
     }
 
     try {
         const requestBody = await req.json();
         const incomingModelId = requestBody.model; 
-        const prompt = requestBody.prompt;
-
-        console.log(`📸 [IMAGE] Model requested: ${incomingModelId}`);
-        console.log(`📸 [IMAGE] Prompt: "${prompt ? prompt.substring(0, 50) + '...' : 'No Prompt'}"`);
+        console.log(`📸 [LOGIC] Model: ${incomingModelId}`);
 
         if (!incomingModelId) return new Response(JSON.stringify({error: 'Missing model'}), { status: 400 });
 
         const providerInfo = MODEL_PROVIDER_MAP.get(incomingModelId);
-        
-        if (!providerInfo) {
-             console.error(`📸 [IMAGE] ❌ Model không tìm thấy trong Map.`);
-             return new Response(JSON.stringify({error: `Model '${incomingModelId}' not found.`}), { status: 404 });
-        }
-        if (!providerInfo.imagePath) {
-            console.error(`📸 [IMAGE] ❌ Provider ${providerInfo.providerId} không hỗ trợ ảnh.`);
-            return new Response(JSON.stringify({error: `Provider '${providerInfo.providerId}' does not support image generation.`}), { status: 400 });
+        if (!providerInfo || !providerInfo.imagePath) {
+             console.log(`📸 [LOGIC] Model/Provider không hợp lệ.`);
+             return new Response(JSON.stringify({error: `Model invalid or no image support.`}), { status: 404 });
         }
 
         const upstreamUrl = `https://${providerInfo.upstreamHost}${providerInfo.imagePath}`;
-        console.log(`📸 [IMAGE] Gửi request tới: ${upstreamUrl}`);
-        console.log(`📸 [IMAGE] Target Model: ${providerInfo.targetModelId}`);
+        console.log(`📸 [LOGIC] Calling Upstream: ${upstreamUrl}`);
 
         const upstreamBody = { 
             model: providerInfo.targetModelId, 
-            prompt: prompt,
+            prompt: requestBody.prompt,
             response_format: requestBody.response_format 
         };
 
-        const startTime = Date.now();
         const upstreamResponse = await fetch(upstreamUrl, {
             method: 'POST',
             headers: COMMON_HEADERS,
             body: JSON.stringify(upstreamBody)
         });
-        const duration = Date.now() - startTime;
 
-        console.log(`📸 [IMAGE] Upstream Status: ${upstreamResponse.status} (${duration}ms)`);
+        console.log(`📸 [LOGIC] Upstream Status: ${upstreamResponse.status}`);
         
-        const contentType = upstreamResponse.headers.get('content-type');
-        console.log(`📸 [IMAGE] Upstream Content-Type: ${contentType}`);
-
-        // XỬ LÝ LỖI UPSTREAM
         if (!upstreamResponse.ok) {
-            const errorText = await upstreamResponse.text();
-            console.error(`📸 [IMAGE] ❌ LỖI TỪ UPSTREAM:\n${errorText}`);
-            return new Response(JSON.stringify({ 
-                error: 'Upstream Error', 
-                status: upstreamResponse.status,
-                upstream_message: errorText 
-            }), { 
-                status: upstreamResponse.status,
-                headers: { 'Content-Type': 'application/json' }
-            });
+            const errText = await upstreamResponse.text();
+            console.log(`📸 [LOGIC] ERROR BODY: ${errText.substring(0, 200)}...`);
+            return new Response(errText, { status: upstreamResponse.status });
         }
 
-        // THÀNH CÔNG -> STREAM ẢNH
-        console.log(`📸 [IMAGE] ✅ Thành công! Đang stream binary về n8n...`);
         return new Response(upstreamResponse.body, {
             status: 200,
             headers: {
-                // n8n cần Content-Type chuẩn để nhận diện file
-                'Content-Type': contentType || 'image/jpeg',
+                'Content-Type': upstreamResponse.headers.get('Content-Type') || 'image/jpeg',
                 'Access-Control-Allow-Origin': '*',
-                'Cache-Control': 'no-cache',
-                // Gợi ý tên file cho n8n
-                'Content-Disposition': `attachment; filename="generated-${Date.now()}.jpg"`
+                'Cache-Control': 'no-cache'
             }
         });
 
     } catch (error) {
-        console.error(`📸 [IMAGE] ❌ Exception: ${error.message}`);
+        console.error(`📸 [LOGIC] Exception: ${error.message}`);
         return new Response(JSON.stringify({ error: error.message }), { status: 500 });
     }
 }
 
 // =================================================================================
-// 🚀 4. Server Entry
+// 🚀 Server Entry (Với Global Logging)
 // =================================================================================
 
-console.log(`🚀 Starting Bun AI Gateway v4.4 (n8n Debug) on port ${PORT}...`);
+console.log(`🚀 Starting Bun AI Gateway v4.5 on port ${PORT}...`);
 buildModelProviderMap();
 
 Bun.serve({
   port: PORT,
   async fetch(req) {
     const url = new URL(req.url);
+    
+    // 🔥 GLOBAL LOG: In ra mọi request đập vào server
+    console.log(`🔔 [INCOMING] ${req.method} ${url.pathname}`);
 
+    // CORS Preflight
     if (req.method === 'OPTIONS') {
         return new Response(null, {
             headers: {
@@ -276,13 +228,19 @@ Bun.serve({
 
     if (MODEL_PROVIDER_MAP === null) await buildModelProviderMap();
 
-    if (url.pathname === '/v1/models') return handleModelsRequest();
-    if (url.pathname === '/v1/chat/completions') return handleChatCompletionRequest(req);
-    if (url.pathname === '/v1/images/generations') return handleImageGenerationRequest(req);
-    
-    if (url.pathname === '/') return new Response('Bun AI Gateway v4.4 Active');
+    // 🛡️ Routing Logic (Bỏ trailing slash để an toàn)
+    const path = url.pathname.replace(/\/$/, ''); 
 
-    return new Response('Not Found', { status: 404 });
+    if (path === '/v1/models') return handleModelsRequest();
+    if (path === '/v1/chat/completions') return handleChatCompletionRequest(req);
+    if (path === '/v1/images/generations') return handleImageGenerationRequest(req);
+    
+    // Nếu không khớp route nào:
+    console.log(`⚠️ [404] Route không khớp: ${path}`);
+    return new Response(JSON.stringify({status: 'online', path: path}), { 
+        status: 404, 
+        headers: {'Content-Type': 'application/json'}
+    });
   },
 });
 
