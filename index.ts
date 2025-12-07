@@ -1,17 +1,25 @@
 /**
- * Bun AI Gateway v4.3 (Worker Dynamic Fixed)
- * - Logic: Cập nhật parser để đọc cấu trúc JSON { success: true, result: [...] } của Worker.
- * - Result: Tự động load ~30+ models từ Worker (DeepSeek, Llama 3, Flux, etc.).
- * - Headers: Optimized based on latest user curl.
+ * Bun AI Gateway v4.4 (Stable & Secured)
+ * - Fix: Ngăn chặn Race Condition khi fetch models (Loop Fix).
+ * - Security: Random Fake IP injection per request.
+ * - Logic: Optimized Parser & Headers.
  */
 
 const API_KEY = process.env.API_KEY || '1'; 
 const PORT = process.env.PORT || 3000;
 
 // =================================================================================
-// 🛡️ 0. Headers Giả lập (Strictly matched)
+// 🛡️ 0. Utilities & Security (Fake IP)
 // =================================================================================
-const COMMON_HEADERS = {
+
+// Hàm tạo IP ngẫu nhiên để tránh bị chặn IP từ phía upstream
+function getRandomIP() {
+    const segment = () => Math.floor(Math.random() * 255);
+    return `103.${segment()}.${segment()}.${segment()}`;
+}
+
+// Base Headers giả lập Browser
+const BASE_HEADERS = {
     'accept': '*/*',
     'accept-language': 'vi-VN,vi;q=0.9',
     'content-type': 'application/json',
@@ -26,12 +34,22 @@ const COMMON_HEADERS = {
     'sec-fetch-site': 'same-origin'
 };
 
+// Hàm lấy headers (Merge Base + Dynamic IP)
+function getHeaders() {
+    const fakeIp = getRandomIP();
+    return {
+        ...BASE_HEADERS,
+        'X-Forwarded-For': fakeIp,
+        'X-Real-IP': fakeIp,
+        'True-Client-IP': fakeIp
+    };
+}
+
 // =================================================================================
 // ⚙️ 1. Cấu hình Providers
 // =================================================================================
 
 const PROVIDER_CONFIG = {
-  // ✅ 1. Worker (Dynamic fetch enabled)
   'worker': {
     name: 'Worker (Cloudflare)',
     upstreamHost: 'g4f.dev',
@@ -105,13 +123,22 @@ const PROVIDER_CONFIG = {
 };
 
 // =================================================================================
-// 🧠 2. Core Logic: Model Map Builder (Updated Parser)
+// 🧠 2. Core Logic: Model Map Builder (Fixed Loop Issue)
 // =================================================================================
 
-let MODEL_PROVIDER_MAP = null;
+// Khởi tạo Map rỗng ngay lập tức để tránh check null liên tục
+let MODEL_PROVIDER_MAP = new Map();
+let isFetchingModels = false; // 🔒 Lock flag
 
 async function buildModelProviderMap() {
-  console.log("🚀 Đang cập nhật danh sách models...");
+  if (isFetchingModels) {
+      console.log("⚠️ Đang cập nhật models, bỏ qua yêu cầu trùng lặp.");
+      return;
+  }
+  
+  isFetchingModels = true;
+  console.log("🚀 Bắt đầu cập nhật danh sách models...");
+  
   const map = new Map();
 
   const fetchPromises = Object.entries(PROVIDER_CONFIG).map(async ([providerKey, config]) => {
@@ -119,34 +146,26 @@ async function buildModelProviderMap() {
       let models = [];
       if (config.modelsPath) {
         const upstreamUrl = `https://${config.upstreamHost}${config.modelsPath}`;
-        const response = await fetch(upstreamUrl, { method: 'GET', headers: COMMON_HEADERS });
+        // Sử dụng dynamic headers cho request này
+        const response = await fetch(upstreamUrl, { method: 'GET', headers: getHeaders() });
         
         if (response.ok) {
             const data = await response.json();
             
-            // --- PARSING LOGIC CẬP NHẬT ---
+            // --- PARSING LOGIC ---
             if (data.success && Array.isArray(data.result)) {
-                // ✅ Case: Worker (g4f) trả về { success: true, result: [{name: ...}] }
                 models = data.result.map(m => m.name).filter(Boolean);
             } 
             else if (Array.isArray(data)) {
-                // Case: HuggingFace/Pollinations ([...])
                 models = data.map(m => m.id || m.name).filter(Boolean);
             } 
             else if (data.data && Array.isArray(data.data)) {
-                // Case: OpenAI Standard / Azure ({ data: [...] })
                 models = data.data.map(m => m.id).filter(Boolean);
             } 
             else if (data.models && Array.isArray(data.models)) {
-                // Case: Ollama ({ models: [...] })
                 models = data.models.map(m => m.name).filter(Boolean);
             }
         }
-      }
-
-      // Xử lý Fallback nếu cần (nhưng với Worker fix trên thì không cần nữa)
-      if (models.length === 0 && config.fallbackModels) {
-          models = config.fallbackModels;
       }
 
       models.forEach(originalModelId => {
@@ -168,8 +187,16 @@ async function buildModelProviderMap() {
   });
 
   await Promise.allSettled(fetchPromises);
-  MODEL_PROVIDER_MAP = map;
-  console.log(`✅ Hoàn tất. Tổng model khả dụng: ${MODEL_PROVIDER_MAP.size}`);
+  
+  // Chỉ cập nhật map global khi có dữ liệu (hoặc giữ cũ nếu lỗi toàn bộ)
+  if (map.size > 0) {
+      MODEL_PROVIDER_MAP = map;
+      console.log(`✅ Cập nhật hoàn tất. Tổng model khả dụng: ${MODEL_PROVIDER_MAP.size}`);
+  } else {
+      console.log("⚠️ Không lấy được model nào, giữ nguyên cache cũ.");
+  }
+  
+  isFetchingModels = false; // 🔓 Unlock
 }
 
 // =================================================================================
@@ -187,14 +214,14 @@ async function handleChatCompletionRequest(req) {
       if (!incomingModelId) return new Response('Missing model', { status: 400 });
 
       const providerInfo = MODEL_PROVIDER_MAP.get(incomingModelId);
-      if (!providerInfo) return new Response(`Model '${incomingModelId}' not found.`, { status: 404 });
+      if (!providerInfo) return new Response(`Model '${incomingModelId}' not found (Try refreshing).`, { status: 404 });
 
       const upstreamUrl = `https://${providerInfo.upstreamHost}${providerInfo.chatPath}`;
       const upstreamBody = { ...requestBody, model: providerInfo.targetModelId };
 
       const upstreamResponse = await fetch(upstreamUrl, {
         method: 'POST',
-        headers: COMMON_HEADERS,
+        headers: getHeaders(), // ✅ Inject Fake IP Headers
         body: JSON.stringify(upstreamBody),
         redirect: 'follow'
       });
@@ -236,7 +263,7 @@ async function handleImageGenerationRequest(req) {
 
         const upstreamResponse = await fetch(upstreamUrl, {
             method: 'POST',
-            headers: COMMON_HEADERS,
+            headers: getHeaders(), // ✅ Inject Fake IP Headers
             body: JSON.stringify(upstreamBody)
         });
 
@@ -258,7 +285,9 @@ async function handleImageGenerationRequest(req) {
 // 🚀 4. Server Entry
 // =================================================================================
 
-console.log(`🚀 Starting Bun AI Gateway v4.3 on port ${PORT}...`);
+console.log(`🚀 Starting Bun AI Gateway v4.4 on port ${PORT}...`);
+
+// Chạy lần đầu (Non-blocking hoặc Blocking tuỳ logic, ở đây để non-blocking nhưng gọi ngay)
 buildModelProviderMap();
 
 Bun.serve({
@@ -266,6 +295,7 @@ Bun.serve({
   async fetch(req) {
     const url = new URL(req.url);
 
+    // CORS pre-flight
     if (req.method === 'OPTIONS') {
         return new Response(null, {
             headers: {
@@ -276,7 +306,11 @@ Bun.serve({
         });
     }
 
-    if (MODEL_PROVIDER_MAP === null) await buildModelProviderMap();
+    // Tự động retry build model map nếu map rỗng (nhưng có lock isFetchingModels để tránh spam)
+    if (MODEL_PROVIDER_MAP.size === 0 && !isFetchingModels) {
+        // Build background, không await để tránh timeout request hiện tại (hoặc await nếu muốn chắc chắn)
+        buildModelProviderMap(); 
+    }
 
     if (url.pathname === '/v1/models') return handleModelsRequest();
     if (url.pathname === '/v1/chat/completions') return handleChatCompletionRequest(req);
@@ -285,8 +319,8 @@ Bun.serve({
     if (url.pathname === '/') {
         return new Response(JSON.stringify({ 
             status: 'ok', 
-            service: 'Bun AI Gateway v4.3',
-            models_count: MODEL_PROVIDER_MAP ? MODEL_PROVIDER_MAP.size : 0 
+            service: 'Bun AI Gateway v4.4',
+            models_count: MODEL_PROVIDER_MAP.size 
         }), { headers: { 'Content-Type': 'application/json' }});
     }
 
@@ -295,7 +329,6 @@ Bun.serve({
 });
 
 function handleModelsRequest() {
-  if (!MODEL_PROVIDER_MAP) return new Response('{}', { status: 503 });
   const modelsData = Array.from(MODEL_PROVIDER_MAP.entries()).map(([id, info]) => ({
     id: id,
     object: 'model',
