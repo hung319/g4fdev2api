@@ -29,7 +29,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Global variables for configuration
-DEFAULT_API_KEY = os.environ.get("DEFAULT_G4F_API_KEY", "g4f-default-key")
+DEFAULT_API_KEY = os.environ.get("DEFAULT_G4F_API_KEY", "1")
 PROXY_URL = os.environ.get("G4F_PROXY", None)
 G4F_API_BASE_URL = os.environ.get("G4F_API_BASE_URL", "http://localhost:1337")
 
@@ -226,42 +226,91 @@ class G4FModelProvider:
             models_with_providers = {
                 "gpt-3.5-turbo": {
                     "base_provider": "openai",
-                    "providers": ["Phind", "FreeChat", "gptgod"],
+                    "providers": [
+                        "Phind",
+                        "FreeChat",
+                        "gptgod",
+                        "FreeGpt",
+                        "Chatgpt4Online",
+                    ],
                     "model_obj": None,
                 },
                 "gpt-4": {
                     "base_provider": "openai",
-                    "providers": ["Phind", "FreeChat", "gptgod"],
+                    "providers": [
+                        "Phind",
+                        "FreeChat",
+                        "gptgod",
+                        "FreeGpt",
+                        "Chatgpt4Online",
+                    ],
                     "model_obj": None,
                 },
                 "gpt-4o": {
                     "base_provider": "openai",
-                    "providers": ["Phind", "FreeChat", "gptgod"],
+                    "providers": [
+                        "Phind",
+                        "FreeChat",
+                        "gptgod",
+                        "FreeGpt",
+                        "Chatgpt4Online",
+                    ],
                     "model_obj": None,
                 },
                 "gpt-4o-mini": {
                     "base_provider": "openai",
-                    "providers": ["Phind", "FreeChat", "gptgod"],
+                    "providers": [
+                        "Phind",
+                        "FreeChat",
+                        "gptgod",
+                        "FreeGpt",
+                        "Chatgpt4Online",
+                    ],
                     "model_obj": None,
                 },
                 "claude-3-haiku": {
                     "base_provider": "anthropic",
-                    "providers": ["FreeChat"],
+                    "providers": ["FreeChat", "Claude3Haiku"],
                     "model_obj": None,
                 },
                 "llama-3.1-70b": {
                     "base_provider": "meta",
-                    "providers": ["MetaAI", "HuggingFace"],
+                    "providers": ["MetaAI", "HuggingFace", "Llama3"],
                     "model_obj": None,
                 },
                 "gemini-pro": {
                     "base_provider": "google",
-                    "providers": ["Bard", "GeminiPro"],
+                    "providers": ["Bard", "GeminiPro", "Gemini"],
                     "model_obj": None,
                 },
                 "mixtral-8x7b": {
                     "base_provider": "mistral",
-                    "providers": ["HuggingFace", "Mistral"],
+                    "providers": ["HuggingFace", "Mistral", "OpenaiChat"],
+                    "model_obj": None,
+                },
+                "dall-e-2": {
+                    "base_provider": "openai",
+                    "providers": ["Prodia", "Pollinations"],
+                    "model_obj": None,
+                },
+                "dall-e-3": {
+                    "base_provider": "openai",
+                    "providers": ["Prodia", "Pollinations"],
+                    "model_obj": None,
+                },
+                "flux": {
+                    "base_provider": "blackforestlabs",
+                    "providers": ["Pollinations", "Prodia"],
+                    "model_obj": None,
+                },
+                "playground-v2.5": {
+                    "base_provider": "playground",
+                    "providers": ["Pollinations"],
+                    "model_obj": None,
+                },
+                "sd-turbo": {
+                    "base_provider": "stability-ai",
+                    "providers": ["Pollinations", "Prodia"],
                     "model_obj": None,
                 },
             }
@@ -277,6 +326,7 @@ class G4FModelProvider:
                 G4F_API_BASE_URL,
                 "https://g4f.space/api/auto",  # Auto provider selection endpoint
                 "https://g4f.space/v1",  # Hosted instance
+                "https://g4f.dev/api/providers",  # Official g4f.dev endpoint
             ]
 
             for base_url in G4F_API_URLS:
@@ -313,6 +363,32 @@ class G4FModelProvider:
             except:
                 # Skip if there's an issue accessing the attribute
                 continue
+
+        # Add known providers that might not be in the module but are mentioned in docs
+        known_providers = [
+            "Pollinations",
+            "Prodia",
+            "MetaAI",
+            "Claude3Haiku",
+            "FreeGpt",
+            "Chatgpt4Online",
+        ]
+        for provider_name in known_providers:
+            # Check if already in the list
+            already_exists = any(
+                p.get("name", p.get("id")) == provider_name for p in providers
+            )
+            if not already_exists:
+                providers.append(
+                    {
+                        "id": provider_name,
+                        "name": provider_name,
+                        "class": None,  # Not available as a class yet
+                        "capabilities": [],
+                        "auth_required": False,
+                    }
+                )
+
         return providers
 
 
@@ -841,6 +917,48 @@ def list_models():
                 "object": "model",
                 "created": 1677610602,
                 "owned_by": "openai",
+            },
+            {
+                "id": "claude-3-haiku",
+                "object": "model",
+                "created": 1677610602,
+                "owned_by": "anthropic",
+            },
+            {
+                "id": "llama-3.1-70b",
+                "object": "model",
+                "created": 1677610602,
+                "owned_by": "meta",
+            },
+            {
+                "id": "gemini-pro",
+                "object": "model",
+                "created": 1677610602,
+                "owned_by": "google",
+            },
+            {
+                "id": "mixtral-8x7b",
+                "object": "model",
+                "created": 1677610602,
+                "owned_by": "mistral",
+            },
+            {
+                "id": "dall-e-2",
+                "object": "model",
+                "created": 1677610602,
+                "owned_by": "openai",
+            },
+            {
+                "id": "dall-e-3",
+                "object": "model",
+                "created": 1677610602,
+                "owned_by": "openai",
+            },
+            {
+                "id": "flux",
+                "object": "model",
+                "created": 1677610602,
+                "owned_by": "blackforestlabs",
             },
         ]
         return jsonify({"object": "list", "data": basic_models})
