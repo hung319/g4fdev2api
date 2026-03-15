@@ -320,31 +320,79 @@ def chat_completions():
             provider=provider, api_key=api_key, custom_proxy=proxy
         )
 
-        # Create the completion
+        # Create the completion - respect the stream parameter
         response = custom_client.chat.completions.create(
             model=model,
             messages=messages,
-            stream=False,  # For now, we'll handle streaming separately if needed
+            stream=stream,
             temperature=temperature,
         )
 
-        content = (
-            response.choices[0].message.content
-            if response.choices and response.choices[0].message
-            else None
-        )
-
-        # Format as OpenAI-compatible response
-        result = ChatCompletionResponse.create_response(model, content or "")
-
         if stream:
-            # For now, just return the response as-is
-            # In a more sophisticated implementation, we'd stream the response
+            # Handle streaming response
             def generate():
-                yield json.dumps(result)
+                try:
+                    full_content = ""
+                    for chunk in response:
+                        if hasattr(chunk.choices[0], "delta") and hasattr(
+                            chunk.choices[0].delta, "content"
+                        ):
+                            content = chunk.choices[0].delta.content
+                            if content is not None:
+                                full_content += content
+                                # Yield SSE (Server-Sent Events) format
+                                yield f"data: {json.dumps({'id': f'chatcmpl-{int(time.time())}', 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': model or 'gpt-3.5-turbo', 'choices': [{'index': 0, 'delta': {'content': content}, 'finish_reason': None}]})}\n\n"
+                    # Send final chunk with finish_reason
+                    yield f"data: {json.dumps({'id': f'chatcmpl-{int(time.time())}', 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': model or 'gpt-3.5-turbo', 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
+                    yield "data: [DONE]\n\n"
+                except Exception as e:
+                    logger.error(f"Streaming error: {str(e)}")
+                    yield f"data: {json.dumps({'id': f'chatcmpl-{int(time.time())}', 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': model or 'gpt-3.5-turbo', 'choices': [{'index': 0, 'delta': {'content': ''}, 'finish_reason': 'stop'}]})}\n\n"
+                    yield "data: [DONE]\n\n"
 
-            return Response(generate(), mimetype="application/json")
+            return Response(generate(), mimetype="text/event-stream")
         else:
+            # Handle non-streaming response
+            if hasattr(response, "__iter__"):
+                # If response is iterable (stream-like), get the full content
+                full_content = ""
+                try:
+                    for chunk in response:
+                        if hasattr(chunk.choices[0], "delta") and hasattr(
+                            chunk.choices[0].delta, "content"
+                        ):
+                            content = chunk.choices[0].delta.content
+                            if content:
+                                full_content += content
+                        elif hasattr(chunk.choices[0], "message") and hasattr(
+                            chunk.choices[0].message, "content"
+                        ):
+                            content = chunk.choices[0].message.content
+                            if content:
+                                full_content += content
+                except:
+                    # Fallback: try to get content directly if it's not streaming
+                    content = (
+                        response.choices[0].message.content
+                        if response.choices
+                        and response.choices[0].message
+                        and hasattr(response.choices[0].message, "content")
+                        else None
+                    )
+                    full_content = content or ""
+            else:
+                # Direct response (not streaming)
+                content = (
+                    response.choices[0].message.content
+                    if response.choices
+                    and response.choices[0].message
+                    and hasattr(response.choices[0].message, "content")
+                    else None
+                )
+                full_content = content or ""
+
+            # Format as OpenAI-compatible response
+            result = ChatCompletionResponse.create_response(model, full_content)
             return jsonify(result)
 
     except Exception as e:
@@ -391,46 +439,95 @@ def completions():
         # Convert prompt to messages format for G4F
         messages = [{"role": "user", "content": prompt}]
 
-        # Create the completion
+        # Create the completion - respect the stream parameter
         response = custom_client.chat.completions.create(
-            model=model, messages=messages, stream=False, temperature=temperature
+            model=model, messages=messages, stream=stream, temperature=temperature
         )
-
-        content = (
-            response.choices[0].message.content
-            if response.choices and response.choices[0].message
-            else None
-        )
-        content_text = content or ""
-
-        # Format as OpenAI-compatible response
-        result = {
-            "id": f"cmpl-{int(time.time())}",
-            "object": "text_completion",
-            "created": int(time.time()),
-            "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "text": content_text,
-                    "logprobs": None,
-                    "finish_reason": "stop",
-                }
-            ],
-            "usage": {
-                "prompt_tokens": len(prompt.split()),
-                "completion_tokens": len(content_text.split()),
-                "total_tokens": len(prompt.split()) + len(content_text.split()),
-            },
-        }
 
         if stream:
-
+            # Handle streaming response for completions
             def generate():
-                yield json.dumps(result)
+                try:
+                    full_content = ""
+                    for chunk in response:
+                        if hasattr(chunk.choices[0], "delta") and hasattr(
+                            chunk.choices[0].delta, "content"
+                        ):
+                            content = chunk.choices[0].delta.content
+                            if content is not None:
+                                full_content += content
+                                # Yield SSE (Server-Sent Events) format for text completion
+                                yield f"data: {json.dumps({'id': f'cmpl-{int(time.time())}', 'object': 'text_completion.chunk', 'created': int(time.time()), 'model': model or 'gpt-3.5-turbo', 'choices': [{'index': 0, 'text': content, 'finish_reason': None}]})}\n\n"
+                    # Send final chunk with finish_reason
+                    yield f"data: {json.dumps({'id': f'cmpl-{int(time.time())}', 'object': 'text_completion.chunk', 'created': int(time.time()), 'model': model or 'gpt-3.5-turbo', 'choices': [{'index': 0, 'text': '', 'finish_reason': 'stop'}]})}\n\n"
+                    yield "data: [DONE]\n\n"
+                except Exception as e:
+                    logger.error(f"Streaming error in completions: {str(e)}")
+                    yield f"data: {json.dumps({'id': f'cmpl-{int(time.time())}', 'object': 'text_completion.chunk', 'created': int(time.time()), 'model': model or 'gpt-3.5-turbo', 'choices': [{'index': 0, 'text': '', 'finish_reason': 'stop'}]})}\n\n"
+                    yield "data: [DONE]\n\n"
 
-            return Response(generate(), mimetype="application/json")
+            return Response(generate(), mimetype="text/event-stream")
         else:
+            # Handle non-streaming response for completions
+            if hasattr(response, "__iter__"):
+                # If response is iterable (stream-like), get the full content
+                full_content = ""
+                try:
+                    for chunk in response:
+                        if hasattr(chunk.choices[0], "delta") and hasattr(
+                            chunk.choices[0].delta, "content"
+                        ):
+                            content = chunk.choices[0].delta.content
+                            if content:
+                                full_content += content
+                        elif hasattr(chunk.choices[0], "message") and hasattr(
+                            chunk.choices[0].message, "content"
+                        ):
+                            content = chunk.choices[0].message.content
+                            if content:
+                                full_content += content
+                except:
+                    # Fallback: try to get content directly if it's not streaming
+                    content = (
+                        response.choices[0].message.content
+                        if response.choices
+                        and response.choices[0].message
+                        and hasattr(response.choices[0].message, "content")
+                        else None
+                    )
+                    full_content = content or ""
+            else:
+                # Direct response (not streaming)
+                content = (
+                    response.choices[0].message.content
+                    if response.choices
+                    and response.choices[0].message
+                    and hasattr(response.choices[0].message, "content")
+                    else None
+                )
+                full_content = content or ""
+
+            # Format as OpenAI-compatible response
+            result = {
+                "id": f"cmpl-{int(time.time())}",
+                "object": "text_completion",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "text": full_content,
+                        "logprobs": None,
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": len(prompt.split()),
+                    "completion_tokens": len(full_content.split()),
+                    "total_tokens": len(prompt.split()) + len(full_content.split()),
+                },
+            }
+
             return jsonify(result)
 
     except Exception as e:
