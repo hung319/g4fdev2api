@@ -39,42 +39,75 @@ class G4FModelProvider:
     def get_all_models_with_providers():
         """Fetch all models with their providers from G4F"""
         models_with_providers = {}
+
         try:
             # Method 1: Use the internal __models__ structure to get models and their providers
             from g4f.models import __models__
 
             for name, (model, providers) in __models__.items():
-                provider_names = []
-                if hasattr(providers, "__iter__") and not isinstance(
-                    providers, (str, bytes)
-                ):
-                    provider_names = [
-                        p.__name__ if hasattr(p, "__name__") else str(p)
-                        for p in providers
-                    ]
-                else:
-                    # Handle case where providers is not iterable
-                    provider_names = [str(providers)]
+                if model is None:
+                    continue  # Skip if model is None
 
-                models_with_providers[name] = {
-                    "base_provider": getattr(model, "base_provider", "unknown"),
-                    "providers": provider_names,
-                    "model_obj": model,
-                }
+                provider_names = []
+                try:
+                    if hasattr(providers, "__iter__") and not isinstance(
+                        providers, (str, bytes)
+                    ):
+                        provider_names = [
+                            p.__name__
+                            if hasattr(p, "__name__") and p.__name__
+                            else str(p)
+                            for p in providers
+                            if p is not None
+                        ]
+                    elif providers is not None:
+                        # Handle case where providers is not iterable
+                        provider_names = [
+                            str(providers) if providers is not None else ""
+                        ]
+
+                    base_provider = (
+                        getattr(model, "base_provider", "unknown") or "unknown"
+                    )
+                    models_with_providers[name] = {
+                        "base_provider": base_provider,
+                        "providers": provider_names,
+                        "model_obj": model,
+                    }
+                except Exception as e:
+                    logger.warning(f"Error processing model {name}: {e}")
+                    # Add the model with minimal info if there's an error
+                    base_provider = (
+                        getattr(model, "base_provider", "unknown")
+                        if model
+                        else "unknown"
+                    )
+                    models_with_providers[name] = {
+                        "base_provider": base_provider or "unknown",
+                        "providers": [],
+                        "model_obj": model,
+                    }
         except Exception as e:
             logger.warning(f"Could not fetch models from __models__: {e}")
             # Fallback - iterate through models.__dict__
-            for model_name, model_obj in models.__dict__.items():
-                if (
-                    not model_name.startswith("_")
-                    and hasattr(model_obj, "name")
-                    and hasattr(model_obj, "base_provider")
-                ):
-                    models_with_providers[model_name] = {
-                        "base_provider": getattr(model_obj, "base_provider", "unknown"),
-                        "providers": [],
-                        "model_obj": model_obj,
-                    }
+            try:
+                for model_name, model_obj in models.__dict__.items():
+                    if (
+                        model_obj is not None
+                        and not model_name.startswith("_")
+                        and hasattr(model_obj, "name")
+                        and hasattr(model_obj, "base_provider")
+                    ):
+                        base_provider = (
+                            getattr(model_obj, "base_provider", "unknown") or "unknown"
+                        )
+                        models_with_providers[model_name] = {
+                            "base_provider": base_provider,
+                            "providers": [],
+                            "model_obj": model_obj,
+                        }
+            except Exception as e2:
+                logger.error(f"Error in fallback model fetching: {e2}")
 
         return models_with_providers
 
@@ -224,7 +257,9 @@ class ChatCompletionResponse:
 
     @staticmethod
     def create_response(
-        model: str, content: str = "", conversation_id: str = None
+        model: Optional[str] = None,
+        content: str = "",
+        conversation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         response_id = f"chatcmpl-{int(time.time())}"
         content_str = content or ""
@@ -412,49 +447,37 @@ def list_models():
         # But in production, you might want to validate the API key here too
         available_models = []
 
-        # Get all models with provider info from G4F
-        models_with_providers = {}
-        try:
-            # Method 1: Use the internal __models__ structure to get models and their providers
-            from g4f.models import __models__
-
-            for name, (model, providers) in __models__.items():
-                models_with_providers[name] = {
-                    "base_provider": model.base_provider,
-                    "providers": [p.__name__ for p in providers],
-                    "model_obj": model,
-                }
-        except:
-            # Fallback to iterating through models.__dict__
-            for model_name, model_obj in models.__dict__.items():
-                if (
-                    not model_name.startswith("_")
-                    and hasattr(model_obj, "name")
-                    and hasattr(model_obj, "base_provider")
-                ):
-                    models_with_providers[model_name] = {
-                        "base_provider": getattr(model_obj, "base_provider", "unknown"),
-                        "providers": [],
-                        "model_obj": model_obj,
-                    }
+        # Get all models with provider info from G4F using the helper class
+        models_with_providers = G4FModelProvider.get_all_models_with_providers()
 
         # Format models in OpenAI style
         for model_name, model_info in models_with_providers.items():
             model_obj = model_info["model_obj"]
-            model_id = getattr(model_obj, "name", model_name) or model_name
+
+            # Safely get model ID
+            model_id = (
+                getattr(model_obj, "name", model_name) if model_obj else str(model_name)
+            )
+            if model_id is None:
+                model_id = str(model_name)
+
+            # Safely get owned_by
             owned_by = (
                 getattr(
                     model_obj, "base_provider", model_info.get("base_provider", "g4f")
                 )
-                or "g4f"
+                if model_obj
+                else model_info.get("base_provider", "g4f")
             )
+            if owned_by is None:
+                owned_by = "g4f"
 
             available_models.append(
                 {
-                    "id": model_id,
+                    "id": str(model_id),
                     "object": "model",
                     "created": 1677610602,  # Use a fixed timestamp for consistency
-                    "owned_by": owned_by,
+                    "owned_by": str(owned_by),
                     "providers": model_info.get(
                         "providers", []
                     ),  # Additional field with provider info
