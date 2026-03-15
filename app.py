@@ -442,8 +442,14 @@ def get_client_with_options(
 
     # Add custom provider if specified
     if provider:
+        # Handle provider/model format (e.g., "Phind/gpt-4")
+        if "/" in provider:
+            provider_name = provider.split("/")[0]
+        else:
+            provider_name = provider
+
         # Find the provider class by name
-        provider_obj = getattr(g4f.Provider, provider, None)
+        provider_obj = getattr(g4f.Provider, provider_name, None)
         if provider_obj:
             client_kwargs["provider"] = provider_obj
         else:
@@ -452,14 +458,20 @@ def get_client_with_options(
                 attr = getattr(g4f.Provider, attr_name)
                 if (
                     hasattr(attr, "__name__")
-                    and attr.__name__.lower() == provider.lower()
+                    and attr.__name__.lower() == provider_name.lower()
                 ):
                     client_kwargs["provider"] = attr
                     break
 
     # Add image provider if specified
     if image_provider:
-        image_provider_obj = getattr(g4f.Provider, image_provider, None)
+        # Handle provider/model format for image providers
+        if "/" in image_provider:
+            image_provider_name = image_provider.split("/")[0]
+        else:
+            image_provider_name = image_provider
+
+        image_provider_obj = getattr(g4f.Provider, image_provider_name, None)
         if image_provider_obj:
             client_kwargs["image_provider"] = image_provider_obj
         else:
@@ -468,7 +480,7 @@ def get_client_with_options(
                 attr = getattr(g4f.Provider, attr_name)
                 if (
                     hasattr(attr, "__name__")
-                    and attr.__name__.lower() == image_provider.lower()
+                    and attr.__name__.lower() == image_provider_name.lower()
                 ):
                     client_kwargs["image_provider"] = attr
                     break
@@ -477,10 +489,23 @@ def get_client_with_options(
     client_kwargs.update(kwargs)
 
     try:
+        # For providers that need special configuration (like Google Bard)
+        if provider and (
+            "bard" in provider.lower()
+            or "gemini" in provider.lower()
+            or "google" in provider.lower()
+        ):
+            # Add headers or cookies if available
+            if "headers" not in client_kwargs:
+                client_kwargs["headers"] = {}
+            # Note: In real implementation, PSID cookies would come from environment or request
+            # For now, we'll just log that they might be needed
+            logger.info(f"Provider {provider} may require authentication tokens")
+
         return Client(**client_kwargs)
     except Exception as e:
         logger.warning(
-            f"Failed to create client with options: {e}, using default client"
+            f"Failed to create client with options: {e}, using default client. Error: {str(e)}"
         )
         return Client()  # fallback
 
@@ -552,8 +577,14 @@ def chat_completions():
         )
 
         # Create the completion - respect the stream parameter
+        # Handle the case when model is specified in provider/model format
+        actual_model = model
+        if "/" in model:
+            # Extract actual model name if in provider/model format
+            actual_model = model.split("/", 1)[1]  # Take part after first slash
+
         response = custom_client.chat.completions.create(
-            model=model,
+            model=actual_model,
             messages=messages,
             stream=stream,
             temperature=temperature,
@@ -671,8 +702,17 @@ def completions():
         messages = [{"role": "user", "content": prompt}]
 
         # Create the completion - respect the stream parameter
+        # Handle the case when model is specified in provider/model format
+        actual_model = model
+        if "/" in model:
+            # Extract actual model name if in provider/model format
+            actual_model = model.split("/", 1)[1]  # Take part after first slash
+
         response = custom_client.chat.completions.create(
-            model=model, messages=messages, stream=stream, temperature=temperature
+            model=actual_model,
+            messages=messages,
+            stream=stream,
+            temperature=temperature,
         )
 
         if stream:
@@ -1069,9 +1109,15 @@ def images_generations():
             image_provider=image_provider, api_key=api_key, custom_proxy=proxy
         )
 
+        # Handle the case when model is specified in provider/model format for image generation
+        actual_model = model
+        if "/" in model:
+            # Extract actual model name if in provider/model format
+            actual_model = model.split("/", 1)[1]  # Take part after first slash
+
         # Generate image using G4F
         response = custom_client.images.generate(
-            model=model, prompt=prompt, response_format=response_format
+            model=actual_model, prompt=prompt, response_format=response_format
         )
 
         # Convert to OpenAI format - be safe about response.data
