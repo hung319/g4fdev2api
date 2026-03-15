@@ -3,3 +3,4 @@ g4f>=0.3.5
 requests
 aiohttp
 websockets
+flask-cors>=4.0.0

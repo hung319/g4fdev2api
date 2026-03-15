@@ -7,6 +7,7 @@ drop-in compatible with existing OpenAI integrations.
 """
 
 from flask import Flask, request, jsonify, Response
+from flask_cors import CORS
 from g4f.client import Client
 import os
 import logging
@@ -21,6 +22,7 @@ import requests
 from g4f.models import ModelRegistry, __models__
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
